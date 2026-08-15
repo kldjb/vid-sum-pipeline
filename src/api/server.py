@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from src.api.query import router as query_router
 from src.retrieval.graph_rag import GraphRAGPipeline
 from src.retrieval.query_embedder import QueryEmbedder
 from src.retrieval.video_summary_generator import VideoSummaryGenerator
@@ -16,8 +17,6 @@ logging.basicConfig(
     )
 logger = logging.getLogger(__name__)
 
-# Global dict to hold pipeline components for reuse
-pipeline_components = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,14 +29,15 @@ async def lifespan(app: FastAPI):
     
     # Load CLIP Model into RAM
     logger.info("Loading CLIP Query Embedder...")
-    pipeline_components["embedder"] = QueryEmbedder()
+    app.state.embedder = QueryEmbedder()
     
     # Connect to Neo4j and ChromaDB
     logger.info("Connecting to databases...")
-    pipeline_components["rag"] = GraphRAGPipeline()
+    app.state.rag = GraphRAGPipeline()
     
     # Initialise Video Generator
-    pipeline_components["generator"] = VideoSummaryGenerator(
+    logger.info("Initialising Video Summary Generator...")
+    app.state.generator = VideoSummaryGenerator(
         s3_bucket=S3_BUCKET_NAME,
         s3_prefix=S3_VIDEO_PREFIX,
         output_dir=Path("output_summaries")
@@ -49,13 +49,14 @@ async def lifespan(app: FastAPI):
     
     # Close connections on server shut down
     logger.info("Shutting down, closing database connections...")
-    if "rag" in pipeline_components:
-        pipeline_components["rag"].close()
+    if hasattr(app.state, "rag"):
+        app.state.rag.close()
 
 
 # Initialise FastAPI app
 app = FastAPI(title="GraphRAG Video Summarisation API", lifespan=lifespan)
+app.include_router(query_router)
 
 if __name__ == "__main__":
     # Start server
-    uvicorn.run("src.server:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("src.api.server:app", host="127.0.0.1", port=8000, reload=True)
