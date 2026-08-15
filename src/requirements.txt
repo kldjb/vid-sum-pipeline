@@ -1,0 +1,14 @@
+boto3
+botocore[crt]
+chromadb
+fastapi
+h5py
+neo4j
+pydantic
+python-dotenv
+ruptures
+torch
+transformers
+tqdm
+uvicorn
+yt_dlp

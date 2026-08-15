@@ -9,5 +9,4 @@ Datasets/*
 *.pptx
 *.docx
 *.ven*
-*.txt
 *__pycache__
