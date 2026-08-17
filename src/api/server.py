@@ -42,9 +42,17 @@ async def lifespan(app: FastAPI):
         s3_prefix=S3_VIDEO_PREFIX,
         output_dir=Path("output_summaries")
     )
+
+    # Load vector index into RAM for faster queries by submitting dummy query
+    logger.info(
+        "Loading vector index into RAM for faster querying (this will take ~2 minutes)..."
+        )
+    dummy_vector = [0.0] * 512 
+    app.state.rag.collection.query(query_embeddings=[dummy_vector], n_results=1)
+    logger.info("Vector index loaded into RAM.")
     
-    logger.info("Server is fully loaded and ready for queries!")
     # Server running via FastAPI
+    logger.info("Server is fully loaded and ready for queries!")
     yield
     
     # Close connections on server shut down
