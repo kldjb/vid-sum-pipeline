@@ -6,7 +6,9 @@ h5py
 neo4j
 pydantic
 python-dotenv
+requests
 ruptures
+streamlit
 torch
 transformers
 tqdm

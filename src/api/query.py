@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -14,7 +15,7 @@ class QueryRequest(BaseModel):
     n_results: int = 3
 
     # Required if search_mode is 'video'
-    video_id: str = None
+    video_id: Optional[str] = None
 
 @router.post("/search")
 async def process_query(payload: QueryRequest, request: Request):
