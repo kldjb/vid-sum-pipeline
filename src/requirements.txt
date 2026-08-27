@@ -1,0 +1,17 @@
+boto3
+botocore[crt]
+chromadb
+git+https://github.com/openai/CLIP.git
+fastapi
+h5py
+neo4j
+pydantic
+python-dotenv
+requests
+ruptures
+streamlit
+torch
+transformers
+tqdm
+uvicorn
+yt_dlp

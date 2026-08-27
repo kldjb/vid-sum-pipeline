@@ -11,7 +11,7 @@ from src.config import (
 
 # Set dataset root path
 DATASET_ROOT = Path(
-    "../Datasets/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/extracted_data"
+    "Datasets/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/extracted_data"
     )
 
 def setup_constraints(driver):
@@ -115,6 +115,21 @@ def run_pipeline():
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     setup_constraints(driver)
 
+    # Only graph videos available in S3 bucket
+    manifest_path = "s3_available_videos.txt"
+    valid_video_ids = set()
+    if Path(manifest_path).exists():
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            valid_video_ids = {line.strip() for line in f if line.strip()}
+        print(
+            f"Loaded {len(valid_video_ids)} valid video IDs from manifest."
+        )
+    else:
+        print(
+            f"WARNING: Manifest {manifest_path} not found."
+            "Proceeding without S3 filtering."
+        )
+
     root = DATASET_ROOT.resolve()
     video_dirs = [d for d in root.iterdir() if d.is_dir()]
 
@@ -122,6 +137,11 @@ def run_pipeline():
 
     for video_dir in video_dirs:
         video_id = video_dir.name
+
+        # Skip if video isn't in S3 bucket
+        if valid_video_ids and video_id not in valid_video_ids:
+            continue
+
         collection_id = get_collection_id(video_id)
         
         # Load change points if available
