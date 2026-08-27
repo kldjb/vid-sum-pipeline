@@ -1,6 +1,7 @@
 boto3
 botocore[crt]
 chromadb
+git+https://github.com/openai/CLIP.git
 fastapi
 h5py
 neo4j

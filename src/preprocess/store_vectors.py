@@ -2,14 +2,14 @@ from pathlib import Path
 import numpy as np
 import re
 import chromadb
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 from src.preprocess.utils import get_collection_id
 from src.config import CHROMADB_COLLECTION_NAME, MODALITY_CONFIG
 
 
-BATCH_SIZE = 2000
+BATCH_SIZE = 500
 
 def _normalize_embeddings(arr):
     # Remove infinite or NaN arrays
@@ -151,9 +151,21 @@ def flush_batch(collection, ids, embeddings, metadatas, documents):
             documents=documents,
         )
 
-def ingest_embeddings(root_dir, db_path="../Datasets/chroma_db"):
+def ingest_embeddings(
+        root_dir,
+        db_path="Datasets/chroma_db",
+        manifest_path="s3_available_videos.txt"
+    ):
     client = chromadb.PersistentClient(path=db_path)
     root = Path(root_dir)
+
+    valid_video_ids = set()
+    if Path(manifest_path).exists():
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            valid_video_ids = {line.strip() for line in f if line.strip()}
+        print(f"Loaded {len(valid_video_ids)} valid video IDs from manifest.")
+    else:
+        print(f"WARNING: Manifest {manifest_path} not found. Proceeding without S3 filtering.")
 
     collection = client.get_or_create_collection(
         name=CHROMADB_COLLECTION_NAME,
@@ -172,6 +184,9 @@ def ingest_embeddings(root_dir, db_path="../Datasets/chroma_db"):
         for path in videos:
             video_id = path.parent.name
 
+            if valid_video_ids and video_id not in valid_video_ids:
+                continue
+
             # Check if first vector for video/modality exists
             test_id = f"{modality}:{video_id}:0"
             
@@ -183,10 +198,10 @@ def ingest_embeddings(root_dir, db_path="../Datasets/chroma_db"):
                 
         print(f"Identified {len(videos_to_process)} new videos to process.")
 
-        # Parallel Processing
+        # MultiThreading
         ids, embeddings, metadatas, documents = [], [], [], []
         
-        with ProcessPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
                 executor.submit(
                     _process_single_video, p, modality
@@ -231,5 +246,5 @@ def ingest_embeddings(root_dir, db_path="../Datasets/chroma_db"):
     print("\nEmbedding ingestion complete.")
 
 if __name__ == "__main__":
-    # ingest_embeddings("../Datasets/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/extracted_data")
-    ingest_embeddings("../Datasets/SM-MrHiSum and SM-VideoXum/SM-MrHiSum-Training-Data/extracted_data")
+    ingest_embeddings("Datasets/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/extracted_data")
+    # ingest_embeddings("Datasets/SM-MrHiSum and SM-VideoXum/SM-MrHiSum-Training-Data/extracted_data")
