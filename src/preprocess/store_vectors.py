@@ -11,7 +11,7 @@ from src.config import CHROMADB_COLLECTION_NAME, MODALITY_CONFIG
 
 BATCH_SIZE = 500
 
-def _normalize_embeddings(arr):
+def _normalise_embeddings(arr):
     # Remove infinite or NaN arrays
     if not np.isfinite(arr).all():
         raise ValueError("Array contains NaN/infinite values")
@@ -125,7 +125,7 @@ def _process_single_video(path, modality):
     video_id = video_dir.name
     
     try:
-        arr = _normalize_embeddings(np.load(path))
+        arr = _normalise_embeddings(np.load(path))
     except Exception as e:
         return False, f"Skipping corrupt or empty file {path}: {e}"
 
@@ -173,7 +173,7 @@ def ingest_embeddings(
     )
 
     for modality, cfg in MODALITY_CONFIG.items():
-        print(f"\nProcessing modality: {modality}...")
+        print(f"Processing modality: {modality}...")
         videos = sorted(root.rglob(cfg["filename"]))
         if not videos:
             print(f"No videos found for {modality}. Skipping.")
@@ -243,7 +243,7 @@ def ingest_embeddings(
         # Dump remaining vectors for modality
         flush_batch(collection, ids, embeddings, metadatas, documents)
 
-    print("\nEmbedding ingestion complete.")
+    print("Embedding ingestion complete.")
 
 if __name__ == "__main__":
     ingest_embeddings("Datasets/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/extracted_data")

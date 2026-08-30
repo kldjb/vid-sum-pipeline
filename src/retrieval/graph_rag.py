@@ -26,7 +26,7 @@ class GraphRAGPipeline:
             self.neo_driver.verify_connectivity()
             logger.info("Successfully connected to Neo4j.")
         except Exception as e:
-            logger.error("\n---CRITICAL: Could not connect to Neo4j!---")
+            logger.error("\nCRITICAL: Could not connect to Neo4j!")
             logger.error("Please ensure the Neo4j database is started and running.")
             sys.exit(1)
         
@@ -39,6 +39,7 @@ class GraphRAGPipeline:
             query_embedding,
             n_unique_videos=3,
             overfetch_factor=10,
+            allowed_modalities=None
             ):
         """
         Fetch top matches across all data, deduplicating video hits.
@@ -46,9 +47,18 @@ class GraphRAGPipeline:
         Overfetch factor required to ensure enough diversity in results
         to return n_unique_videos number of unique videos from hits.
         """
+        # Build ChromaDB modality filter
+        where_clause = None
+        if allowed_modalities:
+            if len(allowed_modalities) == 1:
+                where_clause = {"modality": allowed_modalities[0]}
+            else:
+                where_clause = {"modality": {"$in": allowed_modalities}}
+        
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=n_unique_videos * overfetch_factor
+            n_results=n_unique_videos * overfetch_factor,
+            where=where_clause
         )
         
         unique_videos = set()
@@ -75,15 +85,25 @@ class GraphRAGPipeline:
             query_embedding,
             target_video_id,
             n_results=3,
-            overfetch_factor=300,
-            ):
+            overfetch_factor=1500,
+            allowed_modalities=None,
+        ):
         """
         Filters global vector search for target video.
         """
+        # Build ChromaDB modality filter
+        where_clause = None
+        if allowed_modalities:
+            if len(allowed_modalities) == 1:
+                where_clause = {"modality": allowed_modalities[0]}
+            else:
+                where_clause = {"modality": {"$in": allowed_modalities}}
+        
         # Query ChromaDB for global neighborhood of near matches
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=n_results * overfetch_factor
+            n_results=n_results * overfetch_factor,
+            where=where_clause
         )
         
         if not results['ids']:
@@ -99,6 +119,50 @@ class GraphRAGPipeline:
                 
         # Return hits
         return video_specific_ids
+
+    def fetch_video_vectors(self, target_video_id):
+        """
+        Fetch every vector (embedding + metadata) belonging to one video
+        in a single ChromaDB call. 
+        """
+        return self.collection.get(
+            where={"video_id": target_video_id},
+            include=["embeddings", "metadatas"],
+        )
+    
+    @staticmethod
+    def _rank_cached_vectors(
+            query_embedding,
+            cached_data,
+            allowed_modalities,
+            n_results,
+        ):
+        """
+        Manually calculate cosine-similarity over pre-fetched vectors
+        matching what ChromaDB would return.
+        """
+        query_vec = np.asarray(query_embedding, dtype=np.float32)
+        q_norm = np.linalg.norm(query_vec)
+        if q_norm > 0:
+            query_vec = query_vec / q_norm
+
+        scored = []
+        ids = cached_data.get("ids", [])
+        embeddings = cached_data.get("embeddings", [])
+        metadatas = cached_data.get("metadatas", [])
+
+        for vec_id, embedding, meta in zip(ids, embeddings, metadatas):
+            if allowed_modalities and meta.get("modality") not in allowed_modalities:
+                continue
+            emb = np.asarray(embedding, dtype=np.float32)
+            norm = np.linalg.norm(emb)
+            if norm == 0:
+                continue
+            score = float(np.dot(query_vec, emb / norm))
+            scored.append((score, vec_id))
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [vec_id for _, vec_id in scored[:n_results]]
 
     def _fetch_graph_context(self, node_ids):
         """Pass ChromaDB IDs to Neo4j to retrieve full segment context."""
@@ -147,12 +211,53 @@ class GraphRAGPipeline:
             result = session.run(query, node_ids=node_ids)
             return [record.data() for record in result]
 
+    def _fetch_raw_vector_context(self, node_ids):
+        """
+        Bypasses Neo4j for ablation baselines - formats ChromaDB metadata 
+        to mimic Cypher output structure.
+        """
+        raw_data = self.collection.get(ids=node_ids, include=["metadatas"])
+        mock_context = []
+        
+        for i, node_id in enumerate(raw_data['ids']):
+            meta = raw_data['metadatas'][i]
+            modality = meta.get("modality")
+            
+            # Timestamp extraction for baseline (only available for
+            # certain modalities, otherwise generic defaults used)
+            start = meta.get("timestamp_sec", meta.get("chunk_start", 0.0))
+            end = meta.get("timestamp_sec", meta.get("chunk_end", 0.0))
+
+            # Enforce 5s boundaries for missing temporal bounds
+            if start == end:
+                end = start + 5.0
+            elif modality == "frame" or modality == "aligned_transcript":
+                # Add default point-in-time vectors padding
+                end += 5.0
+                
+            mock_context.append({
+                "video_id": meta.get("video_id"),
+                "segment_id": f"mock_seg_{node_id}",
+                "start_frame": start,
+                "end_frame": end,
+                "matched_vector_ids": [node_id],
+                "matched_modalities": [modality],
+                "total_frames_in_scene": 1,
+                "transcript_timestamps": []
+            })
+            
+        return mock_context
+
     def retrieve(
             self,
             query_embedding,
             search_mode="global",
             target_video_id=None,
+            allowed_modalities=None,
+            use_graph=True,
             n_results=3,
+            overfetch_factor=1500,
+            cached_video_vectors=None,
         ):
         """
         Main GraphRAG pipeline.
@@ -161,28 +266,49 @@ class GraphRAGPipeline:
             - query_embedding
             - search_mode: 'global' (returns unique videos) or 'video' (returns
                 specific scenes from 1 video).
-            - target_video_id (optional): ID of video to summarise query-relevant scenes
+            - target_video_id (optional): ID of video to summarise query-relevant scenes.
+            - allowed_modalities: list of modalities to filter (e.g., ["frame", "transcript", "script"]).
+            - use_graph: whether to traverse Neo4j graph for context or just return ChromaDB hits.
             - n_results: Top-k query-relevant results to return.
+            - overfetch_factor: Factor by which to overfetch results before filtering.
+            - cached_video_vectors (optional): pre-fetched result of vectors for single video.
         """
         if search_mode == "global":
             logger.info(
                 f"Searching ChromaDB for top {n_results} vector matches..."
                 )
             top_ids = self._vector_search_global(
-                query_embedding, n_unique_videos=n_results,
+                query_embedding,
+                n_unique_videos=n_results,
+                allowed_modalities=allowed_modalities,
                 )
         elif search_mode == "video":
             if not target_video_id:
                 raise ValueError(
                     "target_video_id must be provided for video-specific searches."
                     )
-            logger.info(
-                f"Searching ChromaDB for top {n_results} vector matches for video"
-                f" {target_video_id}..."
-                )
-            top_ids = self._vector_search_video(
-                query_embedding, target_video_id, n_results=n_results,
-                )
+            if cached_video_vectors is not None:
+                logger.info(
+                    f"Ranking cached vectors locally for video {target_video_id}..."
+                    )
+                top_ids = self._rank_cached_vectors(
+                    query_embedding,
+                    cached_video_vectors,
+                    allowed_modalities,
+                    n_results,
+                    )
+            else:
+                logger.info(
+                    f"Searching ChromaDB for top {n_results} vector matches for video"
+                    f" {target_video_id}..."
+                    )
+                top_ids = self._vector_search_video(
+                    query_embedding,
+                    target_video_id,
+                    n_results=n_results,
+                    overfetch_factor=overfetch_factor,
+                    allowed_modalities=allowed_modalities,
+                    )
         else:
             raise ValueError("Invalid search_mode. Must be 'global' or 'video'.")
         
@@ -190,9 +316,13 @@ class GraphRAGPipeline:
             logger.info("No results found for query.")
             return []
             
-        logger.info("Traversing Neo4j for surrounding multimodal context...")
-        graph_context = self._fetch_graph_context(top_ids)
-        
+        if use_graph:
+            logger.info("Traversing Neo4j for surrounding multimodal context...")
+            graph_context = self._fetch_graph_context(top_ids)
+        else:
+            logger.info("Ablation Mode: Skipping Neo4j graph traversal.")
+            graph_context = self._fetch_raw_vector_context(top_ids)
+            
         return graph_context[:n_results]
 
     def close(self):

@@ -4,9 +4,13 @@ A pipeline for video summarisation with 2 modes:
 * Video - retrieve a query-relevant summary video for a specific video.
 
 ## Usage
-To start the UI you need to start up a local instance of the graph store and run the backend server and app separately. The following commands assume you have started your graph store instance in Neo4j Desktop.
+To start the UI you need to login to aws (for video summarisation), start up a local instance of the graph store and run the backend server and app separately. The following commands assume you have started your graph store instance in Neo4j Desktop.
 
-In one terminal, start the server by running:    
+Install the aws-cli and then in a terminal, run the command:    
+`aws login`    
+Follow the login instructions in the browser.
+
+After that, start the server by returning to the terminal and running:    
 `python -m src.api.server`
 
 **Once the server has completely setup**, in a separate terminal, launch the frontend app by running:    

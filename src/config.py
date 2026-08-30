@@ -13,7 +13,7 @@ PROJECT_ROOT = SRC_DIR.parent
 
 # Configure AWS S3
 S3_BUCKET_NAME = "video-sum-pipeline"
-S3_VIDEO_PREFIX = "raw-data/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/videos"
+S3_VIDEO_PREFIX = "raw-data/SM-MrHiSum and SM-VideoXum/ActivityNet-Data"
 
 # Configure Neo4J
 NEO4J_URI = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
