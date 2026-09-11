@@ -1,17 +1,34 @@
-from pathlib import Path
+import logging
 import numpy as np
-import re
 import chromadb
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import spacy
 from tqdm import tqdm
 
-from src.preprocess.utils import get_collection_id
+from src.preprocess.utils import get_collection_id, select_centroid_representative_annotator
 from src.config import CHROMADB_COLLECTION_NAME, MODALITY_CONFIG
 
 
+# Setup logger to track missing files and prevent log spam
+logger = logging.getLogger(__name__)
+_missing_files_warned = set()
+
+# Load English NLP model sentence boundary detection
+logger.info("Loading spaCy English model for sentence parsing...")
+nlp = spacy.load("en_core_web_sm")
+logger.info("spaCy model loaded successfully.")
+
+# Batch size to process vectors before flushing to ChromaDB
 BATCH_SIZE = 500
 
-def _normalize_embeddings(arr):
+# Define absolute path to text annotations base directory
+TEXT_ANNOTATIONS_DIR = Path(
+    "Datasets/SM-MrHiSum and SM-VideoXum/"
+    "SM-VideoXum-Text-Annotations"
+)
+
+def _normalise_embeddings(arr):
     # Remove infinite or NaN arrays
     if not np.isfinite(arr).all():
         raise ValueError("Array contains NaN/infinite values")
@@ -37,7 +54,7 @@ def _get_transcript_timestamps(video_dir, row_idx):
     start = float(row_idx * 5.0)
     return start, start + 5.0
 
-def _build_metadata(modality, video_id, row_idx, video_dir):
+def _build_metadata(modality, video_id, row_idx, video_dir, annotator_idx=None):
     row_idx = int(row_idx)
     collection_id = get_collection_id(video_id)
     
@@ -51,6 +68,9 @@ def _build_metadata(modality, video_id, row_idx, video_dir):
         metadata.update({"frame_id": row_idx, "timestamp_sec": float(row_idx)})
     elif modality == "script":
         metadata.update({"sentence_index": row_idx})
+        if annotator_idx is not None:
+            # VideoXum only - which of the 10 annotators this sentence came from
+            metadata["annotator_index"] = int(annotator_idx)
     elif modality == "transcript":
         start, end = _get_transcript_timestamps(video_dir, row_idx)
         metadata.update({"chunk_start": start, "chunk_end": end})
@@ -59,11 +79,28 @@ def _build_metadata(modality, video_id, row_idx, video_dir):
         
     return metadata
 
-def _parse_script_sentences(file_path):
+def _parse_script_sentences(file_path: Path) -> list[str]:
+    """
+    Parse script text file into separate sentences using spaCy.
+
+    Args:
+        file_path (Path): Path target text file.
+
+    Returns:
+        list[str]: Extracted text sentences.
+    """
     with open(file_path, 'r', encoding='utf-8') as f:
         text = f.read().replace('\n', ' ').strip()
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    return [s.strip() for s in sentences if s.strip()]
+        
+    # Process text spaCy pipeline
+    doc = nlp(text)
+    
+    # Extract individual sentences, skip empty strings
+    sentences = [
+        sent.text.strip() for sent in doc.sents if sent.text.strip()
+    ]
+    
+    return sentences
 
 def _parse_txt_line(line):
     line = line.strip()
@@ -72,50 +109,101 @@ def _parse_txt_line(line):
     return line
 
 def _get_document(modality, video_dir, row_idx):
+    """
+    Retrieve textual document for vector.
+    
+    Args:
+        modality (str): Type of data processed.
+        video_dir (Path): Extracted video data directory.
+        row_idx (int): Current index processed.
+        
+    Returns:
+        str: Extracted text string or empty string.
+    """
     if modality == "frame":
-        # ChromaDB requires strings; empty string replaces None
         return ""
 
+    video_id = video_dir.name
+    
     try:
         if modality == "script":
-            script_path = video_dir / "script.txt"
+            script_path = (
+                TEXT_ANNOTATIONS_DIR / "Scripts" / f"{video_id}.txt"
+            )
             if script_path.exists():
                 sentences = _parse_script_sentences(script_path)
                 if row_idx < len(sentences):
                     return sentences[row_idx]
+            else:
+                # Check if warned
+                if script_path not in _missing_files_warned:
+                    logger.warning(f"Script missing: {script_path}")
+                    _missing_files_warned.add(script_path)
             return ""
 
         elif modality == "transcript":
-            transcript_path = video_dir / "transcript.txt"
-            if transcript_path.exists():
-                with open(transcript_path, 'r', encoding='utf-8') as f:
-                    lines = [_parse_txt_line(line) for line in f if line.strip()]
+            ts_path = (
+                TEXT_ANNOTATIONS_DIR / "Transcripts" / f"{video_id}.txt"
+            )
+            if ts_path.exists():
+                with open(ts_path, 'r', encoding='utf-8') as f:
+                    lines = [
+                        _parse_txt_line(l) for l in f if l.strip()
+                    ]
                     if row_idx < len(lines):
                         return lines[row_idx]
+            else:
+                # Check if warned
+                if ts_path not in _missing_files_warned:
+                    logger.warning(f"Transcript missing: {ts_path}")
+                    _missing_files_warned.add(ts_path)
             return ""
 
         elif modality == "aligned_transcript":
-            transcript_path = video_dir / "transcript.txt"
-            ts_path = video_dir / "transcript_timestamps.npy"
+            ts_txt_path = (
+                TEXT_ANNOTATIONS_DIR / "Transcripts" / f"{video_id}.txt"
+            )
+            ts_npy_path = video_dir / "transcript_timestamps.npy"
             
-            if transcript_path.exists() and ts_path.exists():
-                timestamps = np.load(ts_path) 
-                current_time = float(row_idx) 
+            if ts_txt_path.exists() and ts_npy_path.exists():
+                timestamps = np.load(ts_npy_path)
+                current_time = float(row_idx)
                 
-                with open(transcript_path, 'r', encoding='utf-8') as f:
-                    lines = [_parse_txt_line(line) for line in f if line.strip()]
+                with open(ts_txt_path, 'r', encoding='utf-8') as f:
+                    lines = [
+                        _parse_txt_line(l) for l in f if l.strip()
+                    ]
                 
-                for chunk_idx, (start, end) in enumerate(timestamps):
-                    if start <= current_time <= end and chunk_idx < len(lines):
-                        return lines[chunk_idx]
+                for i, (start, end) in enumerate(timestamps):
+                    if start <= current_time <= end:
+                        if i < len(lines):
+                            return lines[i]
+            else:
+                # Check if warned
+                if ts_txt_path not in _missing_files_warned:
+                    logger.warning(f"Transcript missing: {ts_txt_path}")
+                    _missing_files_warned.add(ts_txt_path)
             return ""
 
     except Exception as e:
-        print(
-            f"Error parsing document for {modality}"
-            f" at {video_dir}, index {row_idx}: {e}"
-            )
+        logger.error(
+            f"Error parsing document for {modality} "
+            f"at {video_dir}, index {row_idx}: {e}"
+        )
         return ""
+def _load_annotator_script_sentences(video_id, annotator_idx):
+    """
+    Load and sentence-split the specific annotator's script text:
+    Scripts/{video_id}_{annotator_idx}.txt.
+    """
+    script_path = TEXT_ANNOTATIONS_DIR / "Scripts" / f"{video_id}_{annotator_idx}.txt"
+    if not script_path.exists():
+        if script_path not in _missing_files_warned:
+            logger.warning(f"Script missing: {script_path}")
+            _missing_files_warned.add(script_path)
+        return []
+    return _parse_script_sentences(script_path)
+
 
 def _process_single_video(path, modality):
     """
@@ -123,20 +211,65 @@ def _process_single_video(path, modality):
     """
     video_dir = path.parent
     video_id = video_dir.name
-    
+
     try:
-        arr = _normalize_embeddings(np.load(path))
+        raw = np.load(path)
+    except Exception as e:
+        return False, f"Skipping corrupt or empty file {path}: {e}"
+
+    selected_annotator_idx = None
+    script_sentences = None
+    if modality == "script" and raw.ndim == 3:
+        # VideoXum: pick annotator script closest to the centroid of
+        # all 10, and ingest only that one's per-sentence embeddings
+        if not np.isfinite(raw).all():
+            return False, f"Skipping corrupt script embeddings for {video_id}: NaN/Inf values"
+        selected_annotator_idx = select_centroid_representative_annotator(raw)
+        raw = raw[selected_annotator_idx] # [M_max, 512]
+
+        script_sentences = _load_annotator_script_sentences(video_id, selected_annotator_idx)
+        valid_row_count = int(np.count_nonzero(np.linalg.norm(raw, axis=1)))
+        if script_sentences and len(script_sentences) != valid_row_count:
+            logger.warning(
+                f"{video_id}: annotator {selected_annotator_idx}'s script file "
+                f"has {len(script_sentences)} sentences but {valid_row_count} "
+                f"valid (non-padded) embedding rows - per-sentence document "
+                f"text may be misaligned for this video."
+            )
+
+    try:
+        arr = _normalise_embeddings(raw)
     except Exception as e:
         return False, f"Skipping corrupt or empty file {path}: {e}"
 
     v_ids, v_embeddings, v_metadatas, v_documents = [], [], [], []
+    skipped_zero = 0
     for row_idx, vec in enumerate(arr):
-        doc_text = _get_document(modality, video_dir, row_idx)
+        if not np.linalg.norm(vec):
+            # Zero-padded placeholder
+            skipped_zero += 1
+            continue
+
+        if modality == "script" and selected_annotator_idx is not None:
+            # VideoXum: use the centroid-selected annotator's own script text
+            doc_text = ""
+            if script_sentences and row_idx < len(script_sentences):
+                doc_text = script_sentences[row_idx]
+        else:
+            # Every other modality, and MrHiSum's script case (no annotator axis)
+            doc_text = _get_document(modality, video_dir, row_idx)
 
         v_ids.append(f"{modality}:{video_id}:{row_idx}")
         v_embeddings.append(vec.tolist())
-        v_metadatas.append(_build_metadata(modality, video_id, row_idx, video_dir))
+        metadata = _build_metadata(
+            modality, video_id, row_idx, video_dir,
+            annotator_idx=selected_annotator_idx,
+        )
+        v_metadatas.append(metadata)
         v_documents.append(doc_text)
+
+    if skipped_zero:
+        logger.info(f"{video_id}/{modality}: skipped {skipped_zero} zero-padded rows.")
 
     return True, (v_ids, v_embeddings, v_metadatas, v_documents)
 
@@ -173,7 +306,7 @@ def ingest_embeddings(
     )
 
     for modality, cfg in MODALITY_CONFIG.items():
-        print(f"\nProcessing modality: {modality}...")
+        print(f"Processing modality: {modality}...")
         videos = sorted(root.rglob(cfg["filename"]))
         if not videos:
             print(f"No videos found for {modality}. Skipping.")
@@ -243,7 +376,7 @@ def ingest_embeddings(
         # Dump remaining vectors for modality
         flush_batch(collection, ids, embeddings, metadatas, documents)
 
-    print("\nEmbedding ingestion complete.")
+    print("Embedding ingestion complete.")
 
 if __name__ == "__main__":
     ingest_embeddings("Datasets/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/extracted_data")

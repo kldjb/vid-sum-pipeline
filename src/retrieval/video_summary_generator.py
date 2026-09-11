@@ -40,7 +40,7 @@ class VideoSummaryGenerator:
             video_id: str,
             query_text: str,
             graph_context: list,
-            ) -> Path:
+        ) -> Path:
         """
         Download raw video from S3, cut it into query-relevant segments, 
         and concatenate them into a single summary MP4 with audio.

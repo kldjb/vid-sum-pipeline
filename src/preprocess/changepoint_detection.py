@@ -25,15 +25,19 @@ def calculate_change_points(video_dir):
             np.save(video_dir / "change_points.npy", change_points)
             return True, video_dir.name
             
+        # Normalise embeddings for consistent penalty thresholds
+        # (prevents magnitude differences from skewing RBF distances)
+        embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
         # Use Radial Basis Function (RBF) kernel to measure visual similarity
         # between any two frames. Shots must be minimum 2 frames/seconds (as 
         # frames have been extracted at 1 frame per second).
         algo = rpt.Pelt(model="rbf", min_size=2).fit(embeddings)
         
         # Only declare a new shot if it reduces overall visual variance by at
-        # least 15 points (higher = fewer/longer shots; lower = more/shorter
+        # least 2 points (higher = fewer/longer shots; lower = more/shorter
         # shots).
-        breakpoints = algo.predict(pen=15) 
+        breakpoints = algo.predict(pen=2.0) 
         
         # Convert breakpoints (e.g., [30, 70, n_frames]) to inclusive shot
         # ranges: [[0, 29], [30, 69], ...]
@@ -53,7 +57,7 @@ def calculate_change_points(video_dir):
 
 def main():
     # Get directories of video data
-    dataset_root = Path("../Datasets/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/extracted_data")
+    dataset_root = Path("Datasets/SM-MrHiSum and SM-VideoXum/SM-VideoXum-Training-Data/extracted_data")
     video_dirs = [d for d in dataset_root.iterdir() if d.is_dir()]
     
     print(f"Found {len(video_dirs)} videos. Calculating change points via Kernel Temporal Segmentation (KTS)...")
