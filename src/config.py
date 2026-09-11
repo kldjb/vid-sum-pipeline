@@ -40,3 +40,7 @@ MODALITY_CONFIG = {
 
 # Output directory for the generated summary MP4 files
 VIDEO_SUM_OUTPUT_DIR = Path("output_summaries")
+
+TEXT_ANNOTATIONS_DIR = (
+    PROJECT_ROOT / "Datasets" / "SM-MrHiSum and SM-VideoXum" / "SM-VideoXum-Text-Annotations" / "Scripts"
+)

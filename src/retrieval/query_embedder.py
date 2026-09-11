@@ -1,3 +1,4 @@
+import re
 import torch
 import clip
 
@@ -10,7 +11,8 @@ class QueryEmbedder:
             device: str = None,
         ):
         """
-        Initialise native OpenAI CLIP model and inject fine-tuned VT-CLIP weights.
+        Initialise native OpenAI CLIP model and inject fine-tuned 
+        VT-CLIP weights.
         """
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -61,8 +63,8 @@ class QueryEmbedder:
             unexpected = len(incompatible_keys.unexpected_keys)
             print(
                 f"Successfully loaded VT-CLIP weights! (Missing keys: {missing},"
-                 f" Unexpected keys: {unexpected})"
-                )
+                f" Unexpected keys: {unexpected})"
+            )
 
         except FileNotFoundError:
             print(
@@ -75,25 +77,45 @@ class QueryEmbedder:
     def embed_query(self, text_query: str) -> list[float]:
         """
         Convert text query into 512-dimensional normalised vector list.
+        
+        Parses multi-sentence inputs, embeds them individually to bypass 
+        token limits, and mean-pools them into a single consensus vector.
         """
-        # Tokenise (truncates automatically if > 77 tokens)
-        text_tokens = clip.tokenize([text_query], truncate=True).to(self.device)
+        # Parse sentences for mean-pooling to avoid CLIP token limit cutoff
+        sentences = [
+            s.strip() for s in re.split(r'(?<=[.!?])\s+', text_query) 
+            if s.strip()
+        ]
+        if not sentences:
+            sentences = [text_query]
+        # -----------------------------------------
+
+        # Tokenise sentences
+        text_tokens = clip.tokenize(sentences, truncate=True).to(self.device)
 
         with torch.no_grad():
-            # get text features from model
+            # Get text features from model
             text_features = self.model.encode_text(text_tokens)
 
-            # L2 normalise for cosine similarity in vector database
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            # Mean-pool sentence embeddings into single narrative vector
+            pooled_features = text_features.mean(dim=0, keepdim=True)
 
-        return text_features.squeeze().cpu().tolist()
+            # L2 normalise for cosine similarity in vector database
+            pooled_features = pooled_features / pooled_features.norm(
+                dim=-1, keepdim=True
+            )
+
+        return pooled_features.squeeze().cpu().tolist()
 
 
 if __name__ == "__main__":
     embedder = QueryEmbedder()
-    test_query = "show me scenes with people talking indoors"
+    test_query = (
+        "Show me scenes with people talking indoors. They should be "
+        "sitting around a table. A laptop is visible on the desk."
+    )
 
     vector = embedder.embed_query(test_query)
-    print(f"\nSuccessfully embedded query: '{test_query}'")
+    print(f"\nSuccessfully embedded multi-sentence query")
     print(f"Vector length: {len(vector)} (Should be 512)")
     print(f"First 5 dimensions: {vector[:5]}")

@@ -2,7 +2,7 @@ import numpy as np
 from neo4j import GraphDatabase
 from pathlib import Path
 
-from src.preprocess.utils import get_collection_id
+from src.preprocess.utils import get_collection_id, select_centroid_representative_annotator
 from src.config import (
     NEO4J_URI,
     NEO4J_USER,
@@ -94,20 +94,23 @@ def link_frames_and_transcripts(tx, video_id, transcript_chunks):
             end_time=float(end_time),
         )
 
-def link_scripts(tx, video_id, num_scripts):
+def link_scripts(tx, video_id, script_row_indices):
     """
     Link sentence-level script nodes to corresponding video.
+
+    script_row_indices is the set of row indices stored in ChromaDB
+    for video script vectors.
     """
     tx.run(
         """
         MATCH (v:Video {id: $video_id})
-        UNWIND range(0, $num_scripts - 1) AS s_idx
+        UNWIND $script_row_indices AS s_idx
         MERGE (sc:Script {id: 'script:' + $video_id + ':' + s_idx})
         ON CREATE SET sc.modality = 'script', sc.video_id = $video_id, sc.sentence_index = s_idx
         MERGE (sc)-[:DESCRIBES]->(v)
     """,
         video_id=video_id,
-        num_scripts=int(num_scripts),
+        script_row_indices=[int(i) for i in script_row_indices],
     )
 
 def run_pipeline():
@@ -160,17 +163,24 @@ def run_pipeline():
         vid_emb_path = video_dir / "video_embeddings.npy"
         num_frames = len(np.load(vid_emb_path)) if vid_emb_path.exists() else 0
 
-        # Count total script sentences for MrHiSum (2D) and VideoXum (3D) datasets
+        # Determine which script rows are in ChromaDB for this video
         script_emb_path = video_dir / "script_embeddings.npy"
         if script_emb_path.exists():
             script_arr = np.load(script_emb_path)
 
-            # Flatten to match ChromaDB's exact indexing
-            if script_arr.ndim > 2:
-                script_arr = script_arr.reshape(-1, script_arr.shape[-1])
-            num_scripts = script_arr.shape[0]
+            if script_arr.ndim == 3:
+                # VideoXum: centroid-based annotator selection
+                selected_idx = select_centroid_representative_annotator(script_arr)
+                annotator_block = script_arr[selected_idx]
+            elif script_arr.ndim == 2:
+                annotator_block = script_arr  # MrHiSum: already one script
+            else:
+                annotator_block = np.empty((0, script_arr.shape[-1]))
+
+            norms = np.linalg.norm(annotator_block, axis=1)
+            script_row_indices = np.where(norms > 0)[0]  # drop zero-padded rows
         else:
-            num_scripts = 0
+            script_row_indices = np.array([], dtype=int)
 
         with driver.session() as session:
             session.execute_write(
@@ -183,8 +193,8 @@ def run_pipeline():
                     transcript_chunks,
                 )
             # Store to graph
-            if num_scripts > 0:
-                session.execute_write(link_scripts, video_id, num_scripts)
+            if len(script_row_indices) > 0:
+                session.execute_write(link_scripts, video_id, script_row_indices)
 
         print(f"Successfully graphed video: {video_id}")
 

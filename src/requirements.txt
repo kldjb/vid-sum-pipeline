@@ -4,12 +4,17 @@ chromadb
 git+https://github.com/openai/CLIP.git
 fastapi
 h5py
+matplotlib
 neo4j
+pandas
 pydantic
+pytest
 python-dotenv
 requests
 ruptures
 streamlit
+spacy
+tabulate
 torch
 transformers
 tqdm
